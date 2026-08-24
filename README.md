@@ -1,22 +1,41 @@
-# claude-test
-Claude Code 테스트용 저장소
+# AI Staff Operating System
 
-## 나만의 작업 도우미들
+한 명의 사용자가 7명의 AI 전문인력(시장조사·영업·마케팅·메일·파일정리·인사이트·회의록)에게 업무를 배정하고,
+보고를 검토·승인하고, 승인된 결과가 회사의 지식과 다음 업무로 이어지는 지휘본부입니다.
 
-`.claude/skills/`에 아래 7개의 개인 업무용 스킬이 준비되어 있습니다. Claude Code에서 관련 요청을 하면 자동으로 트리거됩니다.
+이전 버전(Claude Code 채팅 + 정적 Artifact 보드)은 `legacy/`에 그대로 남아 있습니다 — 삭제하지 않았습니다.
+왜 이 구조로 바뀌었는지, 무엇이 실제로 동작하고 무엇이 아직 Mock인지는 `docs/ARCHITECTURE.md`를 먼저 읽어보세요.
 
-| 스킬 | 역할 | 비고 |
-|---|---|---|
-| `market-researcher` | 시장조사 담당자 | 시장/경쟁사/트렌드 리서치 리포트 작성, 조건에 맞는 잠재고객군(리드) 발굴 → `sales-assistant`로 연계 |
-| `sales-assistant` | 영업담당자 | 리드별 어프로치 포인트·제안서·아웃리치 시퀀스 초안 작성 |
-| `marketing-assistant` | 마케팅 담당자 | 콘텐츠 캘린더, 캠페인 기획, SNS/광고 카피 |
-| `mail-checker` | 메일 확인 담당자 | Gmail 확인·요약·라벨 정리. 명백한 쓸모없는 메일(뉴스레터/프로모션)은 자동 정리(휴지통, 30일 복구 가능). 답장은 항상 초안(draft)만 작성하고, 발송은 사용자가 "일괄 발송" 요청 시 전체 목록을 한 번에 승인받은 뒤에만 실행 |
-| `file-organizer` | 파일 정리 담당자 | Google Drive 분류/이동/이름 정리는 자동 실행, 삭제는 항상 승인 후 실행 |
-| `meeting-notes` | 회의록 담당자 | 회의 내용을 요약·태깅해서 Google Drive에 문서로 저장. `insight-sparring-partner`가 참고 자료로 사용 |
-| `insight-sparring-partner` | 인사이트 토론자 | Google Drive에 저장된 회의록/리서치 자료를 근거로 비판적으로 검토해주는 소크라테스식 토론 파트너 |
+## 시작하기
 
-각 스킬의 세부 동작 방식은 해당 폴더의 `SKILL.md`를 참고하세요.
+```bash
+npm install
+cp .env.example .env        # 기본값 그대로도 Demo Mode로 전체 흐름이 동작합니다
+npm run db:push             # SQLite dev.db 생성
+npm run db:seed             # 7명의 Agent 시드
+npm run dev                 # http://localhost:3000
+```
 
-## 업무 지휘본부 (보고 보드)
+Credential 없이도(`ANTHROPIC_API_KEY` 미설정) 지휘본부 → 업무 배정 → Clarifying 대화 → Execution Brief →
+실행 → 검토 → 승인 → Knowledge 색인 → Handoff까지 전체 흐름을 Demo Mode로 그대로 밟아볼 수 있습니다. 실제
+Claude로 동작시키려면 `.env`에 `ANTHROPIC_API_KEY`만 넣으면 됩니다.
 
-6개 담당자에게 업무를 배정하고, 진행 상황·보고·승인까지 관리하는 대시보드를 별도 Artifact로 운영합니다 (소스: `board/`). 업무 배정 → 진행 → 보고 → 승인 흐름과, 서로 이어지는 업무(예: 시장조사 → 영업)를 한눈에 보는 타임라인, 승인된 업무가 쌓이는 완료 테이블을 제공합니다. Claude Artifact의 공유 저장 기능을 사용해서 브라우저를 새로고침해도 상태가 유지되고, 담당자 스킬이 채팅에서 작업을 마치면 그 결과도 자동으로 보드에 반영됩니다.
+## 핵심 루프를 직접 확인하기
+
+UI를 켜지 않고도 Core Loop 전체가 실제로 동작하는지 스크립트로 확인할 수 있습니다:
+
+```bash
+npm run db:push && npm run db:seed   # 매번 깨끗한 상태에서 시작하고 싶다면 rm prisma/dev.db 먼저
+npx tsx scripts/smoke-test.ts            # 배정→Clarifying→Brief→실행→재작업→승인→Knowledge→Handoff
+npx tsx scripts/smoke-test-recurring.ts  # 반복 업무 + Scheduler + 중복 실행 방지
+```
+
+## 문서
+
+- `docs/PRODUCT_SPEC.md` — 이 제품이 무엇이고 무엇이 아닌지
+- `docs/ARCHITECTURE.md` — 기술 구조, 무엇이 실제로 동작하고 무엇이 Mock/미구현인지
+- `docs/AGENTS.md` — 7명의 AI Staff 정의
+- `docs/WORKFLOWS.md` — Task 상태 머신, Handoff, Workflow
+- `docs/INTEGRATIONS.md` — Gmail/Drive/검색/Transcription 연동 방법
+- `docs/DATABASE.md` — 스키마, SQLite→Postgres 이전 방법
+- `CLAUDE.md` — 이 저장소에서 작업할 때 반드시 지켜야 하는 규칙
