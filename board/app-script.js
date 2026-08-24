@@ -19,6 +19,7 @@
     assigned: { label: '배정됨', cls: 'st-assigned' },
     in_progress: { label: '진행중', cls: 'st-progress' },
     reported: { label: '검토 대기', cls: 'st-reported' },
+    scheduled: { label: '다음 실행 대기', cls: 'st-scheduled' },
     accepted: { label: '완료', cls: 'st-accepted' },
     cancelled: { label: '취소됨', cls: 'st-cancelled' }
   };
@@ -132,7 +133,9 @@
     .tl-bar.st-assigned { background: var(--chip-bg); color: var(--chip-ink); }
     .tl-bar.st-progress { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
     .tl-bar.st-reported { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
+    .tl-bar.st-scheduled { background: var(--surface); color: var(--accent); border: 1px dashed var(--accent); }
     .tl-bar.st-accepted { background: var(--ok-bg); color: var(--ok); }
+    .tl-bar.recurring { background-image: repeating-linear-gradient(45deg, rgba(0,0,0,.05) 0 6px, transparent 6px 12px); }
     .tl-legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--ink-muted); }
     .tl-legend span { display: inline-flex; align-items: center; gap: 5px; }
     .tl-legend i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
@@ -175,11 +178,15 @@
     .tag.st-assigned { background: var(--chip-bg); color: var(--chip-ink); }
     .tag.st-progress { background: var(--accent-bg); color: var(--accent); }
     .tag.st-reported { background: var(--warn-bg); color: var(--warn); }
+    .tag.st-scheduled { background: var(--surface); color: var(--accent); border: 1px dashed var(--accent); }
     .tag.st-accepted { background: var(--ok-bg); color: var(--ok); }
     .tag.st-cancelled { background: var(--chip-bg); color: var(--ink-muted); }
     .deadline { font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); flex: none; }
     .deadline.overdue { color: var(--danger); font-weight: 600; }
     .dep-badge { font-size: 11px; color: var(--ink-muted); flex: none; }
+    .recur-badge { font-size: 11px; color: var(--accent); flex: none; }
+    .topic-tag { font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: var(--accent-bg); color: var(--accent); display: inline-block; }
+    .topic-tags { display: flex; gap: 4px; flex-wrap: wrap; }
 
     .task-body { display: none; padding: 12px; border-top: 1px solid var(--line); background: var(--surface-2); flex-direction: column; gap: 10px; }
     .task-body.open { display: flex; }
@@ -282,6 +289,99 @@
     return null;
   }
 
+  function lastOfType(thread, type) {
+    for (var i = thread.length - 1; i >= 0; i--) if (thread[i].type === type) return thread[i];
+    return null;
+  }
+
+  function cleanTags(tags) {
+    return (tags || []).map(function (x) { return String(x).trim(); }).filter(Boolean);
+  }
+
+  function allTags(state) {
+    var set = {};
+    state.tasks.forEach(function (t) {
+      (t.tags || []).forEach(function (tag) { set[tag] = true; });
+      (t.runs || []).forEach(function (r) { (r.tags || []).forEach(function (tag) { set[tag] = true; }); });
+    });
+    return Object.keys(set).sort();
+  }
+
+  /* ================= pure mutators (shared by browser + Node) =================
+     Every mutator takes the CURRENT state and returns a brand-new state object;
+     the caller (browser event handler, or the Node CLI) is responsible for
+     turning that into a published version. Keeping these pure and side-effect
+     free is what lets the exact same task lifecycle run from a page click or
+     from an agent script without the two ever drifting apart. */
+
+  function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
+
+  function newTaskId() { return 't-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7); }
+
+  var mutations = {
+    assign: function (state, roleId, data) {
+      var s = deepClone(state), now = Date.now();
+      var recurring = !!data.recurring;
+      s.tasks.push({
+        id: newTaskId(), roleId: roleId, title: data.title, brief: data.brief || '',
+        deadline: recurring ? null : (data.deadline || null),
+        dependsOn: data.dependsOn || null,
+        recurring: recurring,
+        createdAt: now, status: 'assigned', acceptedAt: null,
+        tags: [], runs: [],
+        thread: [{ type: 'assign', text: data.brief || '', ts: now }]
+      });
+      return s;
+    },
+    start: function (state, taskId) {
+      var s = deepClone(state), t = taskById(s, taskId);
+      if (!t || (t.status !== 'assigned' && t.status !== 'scheduled')) return s;
+      t.status = 'in_progress';
+      t.thread.push({ type: 'start', text: '', ts: Date.now() });
+      return s;
+    },
+    report: function (state, taskId, text) {
+      if (!text || !text.trim()) return state;
+      var s = deepClone(state), t = taskById(s, taskId);
+      if (!t) return s;
+      t.status = 'reported';
+      t.thread.push({ type: 'report', text: text.trim(), ts: Date.now() });
+      return s;
+    },
+    accept: function (state, taskId, tags) {
+      var s = deepClone(state), t = taskById(s, taskId);
+      if (!t) return s;
+      var now = Date.now();
+      tags = cleanTags(tags);
+      if (t.recurring) {
+        var rep = lastOfType(t.thread, 'report');
+        t.runs.push({ text: rep ? rep.text : '', tags: tags, reportedAt: rep ? rep.ts : now, acceptedAt: now });
+        t.status = 'scheduled';
+      } else {
+        t.status = 'accepted';
+        t.acceptedAt = now;
+        t.tags = tags;
+      }
+      t.thread.push({ type: 'accept', text: '', ts: now, tags: tags });
+      return s;
+    },
+    revise: function (state, taskId, text) {
+      if (!text || !text.trim()) return state;
+      var s = deepClone(state), t = taskById(s, taskId);
+      if (!t) return s;
+      t.status = 'in_progress';
+      t.thread.push({ type: 'feedback', text: text.trim(), ts: Date.now() });
+      return s;
+    },
+    cancel: function (state, taskId) {
+      var s = deepClone(state), t = taskById(s, taskId);
+      if (!t) return s;
+      t.status = 'cancelled';
+      t.thread.push({ type: 'cancel', text: '', ts: Date.now() });
+      return s;
+    }
+  };
+
   /* ================= render: pure string builders ================= */
 
   function statsHtml(state) {
@@ -330,7 +430,7 @@
     var rangeStart = todayStr, rangeEnd = addDaysStr(todayStr, 13);
     tasks.forEach(function (t) {
       var s = dateOnly(t.createdAt);
-      var e = t.deadline || s;
+      var e = t.recurring ? rangeEnd : (t.deadline || s);
       if (s < rangeStart) rangeStart = s;
       if (e > rangeEnd) rangeEnd = e;
     });
@@ -350,11 +450,11 @@
 
       var tracks = [];
       roleTasks.forEach(function (t) {
-        var s = dateOnly(t.createdAt), e = t.deadline || s;
+        var s = dateOnly(t.createdAt), e = t.recurring ? rangeEnd : (t.deadline || s);
         var placed = false;
         for (var ti = 0; ti < tracks.length; ti++) {
           var last = tracks[ti][tracks[ti].length - 1];
-          var lastEnd = last.deadline || dateOnly(last.createdAt);
+          var lastEnd = last.recurring ? rangeEnd : (last.deadline || dateOnly(last.createdAt));
           if (dayDiff(lastEnd, s) > 0) { tracks[ti].push(t); placed = true; break; }
         }
         if (!placed) tracks.push([t]);
@@ -365,16 +465,18 @@
       var bars = '';
       tracks.forEach(function (track, ti) {
         track.forEach(function (t) {
-          var s = dateOnly(t.createdAt), e = t.deadline || s;
+          var s = dateOnly(t.createdAt), e = t.recurring ? rangeEnd : (t.deadline || s);
           var left = Math.max(0, dayDiff(rangeStart, s)) * DAY_W + 3;
           var span = Math.max(1, dayDiff(s, e) + 1) * DAY_W - 6;
           var meta = STATUS_META[t.status] || STATUS_META.assigned;
           var dep = t.dependsOn ? ' ⛓' : '';
+          var recur = t.recurring ? ' recurring' : '';
+          var label = (t.recurring ? '🔁 ' : '') + escapeHtml(t.title) + dep;
           bars +=
-            '<div class="tl-bar ' + meta.cls + '" data-bar="' + t.id + '" ' +
+            '<div class="tl-bar ' + meta.cls + recur + '" data-bar="' + t.id + '" ' +
               'style="left:' + left + 'px;width:' + span + 'px;top:' + (ti * (TRACK_H + TRACK_GAP) + LANE_PAD / 2) + 'px;height:' + TRACK_H + 'px" ' +
-              'title="' + escapeHtml(t.title) + ' · ' + meta.label + '">' +
-              escapeHtml(t.title) + dep +
+              'title="' + escapeHtml(t.title) + ' · ' + meta.label + (t.recurring ? ' · 매일 반복 (' + t.runs.length + '회 완료)' : '') + '">' +
+              label +
             '</div>';
         });
       });
@@ -397,18 +499,23 @@
         '<span><i style="background:var(--chip-bg)"></i>배정됨</span>' +
         '<span><i style="background:var(--accent)"></i>진행중</span>' +
         '<span><i style="background:var(--warn)"></i>검토 대기</span>' +
+        '<span><i style="background:var(--surface);border:1px dashed var(--accent)"></i>다음 실행 대기</span>' +
         (ui.showCompletedInTimeline ? '<span><i style="background:var(--ok)"></i>완료</span>' : '') +
-        '<span>⛓ 선행 업무 있음</span>' +
+        '<span>⛓ 선행 업무 있음 · 🔁 매일 반복</span>' +
       '</div></div>'
     );
   }
 
   function threadItemHtml(item) {
     var label = THREAD_LABEL[item.type] || item.type;
+    var tagsHtml = (item.tags && item.tags.length)
+      ? '<div class="topic-tags">' + item.tags.map(function (tg) { return '<span class="topic-tag">#' + escapeHtml(tg) + '</span>'; }).join('') + '</div>'
+      : '';
     return (
       '<div class="thread-item ' + item.type + '">' +
         '<div class="th-meta">' + label + ' · ' + formatRelative(item.ts) + '</div>' +
         (item.text ? '<div>' + escapeHtml(item.text) + '</div>' : '') +
+        tagsHtml +
       '</div>'
     );
   }
@@ -430,20 +537,30 @@
         '</div>';
     }
     if (task.status === 'reported') {
-      if (open === 'revise') {
+      if (open === 'accept') {
+        actions +=
+          '<div class="inline-form" style="flex:1 1 100%">' +
+            '<div class="field"><span class="lbl">태그 (쉼표로 구분, 선택)</span><input type="text" data-accept-input="' + task.id + '" placeholder="예: 고객사A, Q3영업"></div>' +
+            '<div class="form-actions"><button class="btn-primary" data-act="submit-accept" data-task="' + task.id + '">태그 달고 승인</button></div>' +
+          '</div>';
+      } else if (open === 'revise') {
         actions +=
           '<div class="inline-form" style="flex:1 1 100%">' +
             '<textarea data-revise-input="' + task.id + '" placeholder="무엇을 다시 해야 하는지 적어주세요"></textarea>' +
             '<div class="form-actions"><button class="btn-primary" data-act="submit-revise" data-task="' + task.id + '">피드백 보내고 재작업 요청</button></div>' +
           '</div>';
       } else {
-        actions += '<button class="btn-primary" data-act="accept-task" data-task="' + task.id + '">승인</button>';
+        actions += '<button class="btn-primary" data-act="open-accept" data-task="' + task.id + '">승인</button>';
         actions += '<button class="btn-ghost" data-act="open-revise" data-task="' + task.id + '">피드백 / 재작업 요청</button>';
       }
     }
     if (task.status !== 'accepted' && task.status !== 'cancelled') {
-      actions += '<button class="btn-danger" data-act="cancel-task" data-task="' + task.id + '">업무 취소</button>';
+      actions += '<button class="btn-danger" data-act="cancel-task" data-task="' + task.id + '">업무 취소' + (task.recurring ? ' (반복 중지)' : '') + '</button>';
     }
+
+    var deadlineText = task.recurring
+      ? ('🔁 매일 반복' + (task.runs.length ? ' · ' + task.runs.length + '회 완료' : ''))
+      : fmtDeadline(task.deadline);
 
     return (
       '<div class="task-item">' +
@@ -451,7 +568,7 @@
           '<span class="tag ' + meta.cls + '">' + meta.label + '</span>' +
           '<span class="task-title">' + escapeHtml(task.title) + '</span>' +
           (dep ? '<span class="dep-badge" title="선행 업무: ' + escapeHtml(dep.title) + '">⛓ ' + escapeHtml(ROLE_BY_ID[dep.roleId] ? ROLE_BY_ID[dep.roleId].name : '') + '</span>' : '') +
-          '<span class="deadline' + (isOverdue(task) ? ' overdue' : '') + '">' + fmtDeadline(task.deadline) + '</span>' +
+          '<span class="deadline' + (isOverdue(task) ? ' overdue' : '') + '">' + deadlineText + '</span>' +
         '</div>' +
         '<div class="task-body' + (open ? ' open' : '') + '">' +
           '<div class="task-brief">' + escapeHtml(task.brief || '(상세 지시사항 없음)') + '</div>' +
@@ -474,8 +591,9 @@
       '<div class="assign-form' + (open ? ' open' : '') + '" data-assign-form="' + role.id + '">' +
         '<div class="field"><span class="lbl">업무 제목</span><input type="text" name="title" placeholder="예: B2B SaaS 잠재고객 20곳 조사"></div>' +
         '<div class="field"><span class="lbl">상세 지시사항</span><textarea name="brief" placeholder="조건, 배경, 원하는 결과물 형태를 최대한 자세히 적어주세요"></textarea></div>' +
+        '<label class="toggle"><input type="checkbox" name="recurring" data-act="toggle-recurring" data-role="' + role.id + '"> 매일 반복 실행 (데드라인 없이 매일 한 번씩 돌려요)</label>' +
         '<div class="field-row">' +
-          '<div class="field"><span class="lbl">데드라인</span><input type="date" name="deadline"></div>' +
+          '<div class="field" data-deadline-field="' + role.id + '"><span class="lbl">데드라인</span><input type="date" name="deadline"></div>' +
           '<div class="field"><span class="lbl">선행 업무 (선택)</span><select name="dependsOn"><option value="">없음</option>' + depOptions + '</select></div>' +
         '</div>' +
         '<div class="form-actions">' +
@@ -508,38 +626,74 @@
     );
   }
 
-  function tableHtml(state, ui) {
-    var accepted = state.tasks.filter(function (t) { return t.status === 'accepted'; })
-      .sort(function (a, b) { return (b.acceptedAt || 0) - (a.acceptedAt || 0); });
-    var filtered = ui.tableRoleFilter === 'all' ? accepted : accepted.filter(function (t) { return t.roleId === ui.tableRoleFilter; });
+  function completedRows(state) {
+    var rows = [];
+    state.tasks.forEach(function (t) {
+      if (t.recurring) {
+        t.runs.forEach(function (run, idx) {
+          rows.push({
+            roleId: t.roleId, title: t.title, isRecurring: true, runIndex: idx + 1,
+            deadlineLabel: '매일 반복', completedAt: run.acceptedAt, summary: run.text, tags: run.tags || []
+          });
+        });
+      } else if (t.status === 'accepted') {
+        var reportItem = lastOfType(t.thread, 'report');
+        rows.push({
+          roleId: t.roleId, title: t.title, isRecurring: false, runIndex: null,
+          deadlineLabel: fmtDeadline(t.deadline), completedAt: t.acceptedAt,
+          summary: reportItem ? reportItem.text : '', tags: t.tags || []
+        });
+      }
+    });
+    return rows.sort(function (a, b) { return (b.completedAt || 0) - (a.completedAt || 0); });
+  }
 
-    var filters = '<button class="chip-filter' + (ui.tableRoleFilter === 'all' ? ' active' : '') + '" data-act="set-table-filter" data-value="all">전체 (' + accepted.length + ')</button>' +
+  function tableHtml(state, ui) {
+    var all = completedRows(state);
+    var byRole = ui.tableRoleFilter === 'all' ? all : all.filter(function (r) { return r.roleId === ui.tableRoleFilter; });
+    var filtered = ui.tableTagFilter === 'all' ? byRole : byRole.filter(function (r) { return r.tags.indexOf(ui.tableTagFilter) !== -1; });
+
+    var roleFilters = '<button class="chip-filter' + (ui.tableRoleFilter === 'all' ? ' active' : '') + '" data-act="set-table-filter" data-value="all">전체 담당자 (' + all.length + ')</button>' +
       ROLES.map(function (r) {
-        var n = accepted.filter(function (t) { return t.roleId === r.id; }).length;
+        var n = all.filter(function (row) { return row.roleId === r.id; }).length;
+        if (!n) return '';
         return '<button class="chip-filter' + (ui.tableRoleFilter === r.id ? ' active' : '') + '" data-act="set-table-filter" data-value="' + r.id + '">' + escapeHtml(r.name) + ' (' + n + ')</button>';
       }).join('');
 
+    var tags = allTags(state);
+    var tagFilters = tags.length ? (
+      '<div class="filter-row">' +
+        '<button class="chip-filter' + (ui.tableTagFilter === 'all' ? ' active' : '') + '" data-act="set-table-tag-filter" data-value="all">태그 전체</button>' +
+        tags.map(function (tg) {
+          return '<button class="chip-filter' + (ui.tableTagFilter === tg ? ' active' : '') + '" data-act="set-table-tag-filter" data-value="' + escapeHtml(tg) + '">#' + escapeHtml(tg) + '</button>';
+        }).join('') +
+      '</div>'
+    ) : '';
+
     if (!filtered.length) {
-      return '<div class="filter-row">' + filters + '</div><div class="table-wrap"><div class="table-empty">아직 승인된 업무가 없어요. 보고를 검토하고 승인하면 여기 쌓여요.</div></div>';
+      return '<div class="filter-row">' + roleFilters + '</div>' + tagFilters + '<div class="table-wrap"><div class="table-empty">' +
+        (all.length ? '이 필터에 해당하는 완료 업무가 없어요.' : '아직 승인된 업무가 없어요. 보고를 검토하고 승인하면 여기 쌓여요.') +
+        '</div></div>';
     }
 
-    var rows = filtered.map(function (t) {
-      var reportItem = null;
-      for (var i = t.thread.length - 1; i >= 0; i--) { if (t.thread[i].type === 'report') { reportItem = t.thread[i]; break; } }
+    var rowsHtml = filtered.map(function (r) {
+      var summary = r.summary && r.summary.length > 80 ? r.summary.slice(0, 80) + '…' : (r.summary || '');
+      var tagsHtml = r.tags.length ? '<div class="topic-tags">' + r.tags.map(function (tg) { return '<span class="topic-tag">#' + escapeHtml(tg) + '</span>'; }).join('') + '</div>' : '';
       return (
         '<tr>' +
-          '<td>' + escapeHtml(ROLE_BY_ID[t.roleId].name) + '</td>' +
-          '<td>' + escapeHtml(t.title) + '</td>' +
-          '<td class="num">' + fmtDeadline(t.deadline) + '</td>' +
-          '<td class="num">' + fmtDeadline(dateOnly(t.acceptedAt)) + '</td>' +
-          '<td>' + escapeHtml(reportItem ? (reportItem.text.length > 80 ? reportItem.text.slice(0, 80) + '…' : reportItem.text) : '') + '</td>' +
+          '<td>' + escapeHtml(ROLE_BY_ID[r.roleId].name) + '</td>' +
+          '<td>' + escapeHtml(r.title) + (r.isRecurring ? ' <span class="dep-badge">🔁 ' + r.runIndex + '회차</span>' : '') + '</td>' +
+          '<td class="num">' + r.deadlineLabel + '</td>' +
+          '<td class="num">' + fmtDeadline(dateOnly(r.completedAt)) + '</td>' +
+          '<td>' + escapeHtml(summary) + '</td>' +
+          '<td>' + tagsHtml + '</td>' +
         '</tr>'
       );
     }).join('');
 
     return (
-      '<div class="filter-row">' + filters + '</div>' +
-      '<div class="table-wrap"><table><thead><tr><th>담당자</th><th>업무</th><th>데드라인</th><th>완료일</th><th>보고 요약</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      '<div class="filter-row">' + roleFilters + '</div>' + tagFilters +
+      '<div class="table-wrap"><table><thead><tr><th>담당자</th><th>업무</th><th>주기</th><th>완료일</th><th>보고 요약</th><th>태그</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>'
     );
   }
 
@@ -580,13 +734,18 @@
 
   var exportsApi = {
     ROLES: ROLES,
+    ROLE_BY_ID: ROLE_BY_ID,
     STATUS_META: STATUS_META,
     HEAD_EXTRA: HEAD_EXTRA,
     STYLE_CSS: STYLE_CSS,
     shellHtml: shellHtml,
     appHtml: appHtml,
     escapeHtml: escapeHtml,
-    dateOnly: dateOnly
+    dateOnly: dateOnly,
+    taskById: taskById,
+    lastOfType: lastOfType,
+    allTags: allTags,
+    mutations: mutations
   };
 
   if (typeof module !== 'undefined' && module.exports) {
@@ -602,12 +761,10 @@
     var STATE = JSON.parse(document.getElementById('state-data').textContent);
     var ui = {
       openAssign: {}, openTask: {}, showCancelled: {},
-      showCompletedInTimeline: false, tableRoleFilter: 'all',
+      showCompletedInTimeline: false, tableRoleFilter: 'all', tableTagFilter: 'all',
       saving: false, readOnly: false, offline: false, error: ''
     };
     var artifactCap = null;
-
-    function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
 
     function render() {
       var todayEl;
@@ -661,24 +818,12 @@
       });
     }
 
-    function findTask(s, id) { for (var i = 0; i < s.tasks.length; i++) if (s.tasks[i].id === id) return s.tasks[i]; return null; }
-
-    function assignTask(roleId, data) {
-      var s = deepClone(STATE), now = Date.now();
-      s.tasks.push({
-        id: 't-' + now + '-' + Math.random().toString(36).slice(2, 7),
-        roleId: roleId, title: data.title, brief: data.brief,
-        deadline: data.deadline || null, dependsOn: data.dependsOn || null,
-        createdAt: now, status: 'assigned', acceptedAt: null,
-        thread: [{ type: 'assign', text: data.brief, ts: now }]
-      });
-      publishState(s);
-    }
-    function startTask(id) { var s = deepClone(STATE), t = findTask(s, id); if (!t) return; t.status = 'in_progress'; t.thread.push({ type: 'start', text: '', ts: Date.now() }); publishState(s); }
-    function submitReport(id, text) { if (!text || !text.trim()) return; var s = deepClone(STATE), t = findTask(s, id); if (!t) return; t.status = 'reported'; t.thread.push({ type: 'report', text: text.trim(), ts: Date.now() }); publishState(s); }
-    function acceptTask(id) { var s = deepClone(STATE), t = findTask(s, id); if (!t) return; t.status = 'accepted'; t.acceptedAt = Date.now(); t.thread.push({ type: 'accept', text: '', ts: Date.now() }); publishState(s); }
-    function requestRevision(id, text) { if (!text || !text.trim()) return; var s = deepClone(STATE), t = findTask(s, id); if (!t) return; t.status = 'in_progress'; t.thread.push({ type: 'feedback', text: text.trim(), ts: Date.now() }); publishState(s); }
-    function cancelTask(id) { var s = deepClone(STATE), t = findTask(s, id); if (!t) return; t.status = 'cancelled'; t.thread.push({ type: 'cancel', text: '', ts: Date.now() }); publishState(s); }
+    function assignTask(roleId, data) { publishState(mutations.assign(STATE, roleId, data)); }
+    function startTask(id) { publishState(mutations.start(STATE, id)); }
+    function submitReport(id, text) { publishState(mutations.report(STATE, id, text)); }
+    function acceptTask(id, tags) { publishState(mutations.accept(STATE, id, tags)); }
+    function requestRevision(id, text) { publishState(mutations.revise(STATE, id, text)); }
+    function cancelTask(id) { publishState(mutations.cancel(STATE, id)); }
 
     document.addEventListener('click', function (ev) {
       var el = ev.target.closest('[data-act]');
@@ -697,16 +842,26 @@
           title: title,
           brief: form.querySelector('[name=brief]').value.trim(),
           deadline: form.querySelector('[name=deadline]').value,
-          dependsOn: form.querySelector('[name=dependsOn]').value || null
+          dependsOn: form.querySelector('[name=dependsOn]').value || null,
+          recurring: form.querySelector('[name=recurring]').checked
         });
+      } else if (act === 'toggle-recurring') {
+        var df = document.querySelector('[data-deadline-field="' + roleId + '"]');
+        if (df) df.style.display = el.checked ? 'none' : '';
       } else if (act === 'toggle-task') {
         ui.openTask[taskId] = ui.openTask[taskId] ? false : true; render();
       } else if (act === 'start-task') { startTask(taskId); }
       else if (act === 'submit-report') {
         var ta = document.querySelector('[data-report-input="' + taskId + '"]');
         submitReport(taskId, ta.value);
-      } else if (act === 'accept-task') { acceptTask(taskId); }
-      else if (act === 'open-revise') {
+      } else if (act === 'open-accept') {
+        ui.openTask[taskId] = 'accept'; render();
+        setTimeout(function () { var af = document.querySelector('[data-accept-input="' + taskId + '"]'); if (af) af.focus(); }, 0);
+      } else if (act === 'submit-accept') {
+        var ai = document.querySelector('[data-accept-input="' + taskId + '"]');
+        var tags = ai.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+        acceptTask(taskId, tags);
+      } else if (act === 'open-revise') {
         ui.openTask[taskId] = 'revise'; render();
         setTimeout(function () { var fa = document.querySelector('[data-revise-input="' + taskId + '"]'); if (fa) fa.focus(); }, 0);
       } else if (act === 'submit-revise') {
@@ -717,6 +872,7 @@
       } else if (act === 'toggle-cancelled') { ui.showCancelled[roleId] = !ui.showCancelled[roleId]; render(); }
       else if (act === 'toggle-timeline-completed') { ui.showCompletedInTimeline = !ui.showCompletedInTimeline; render(); }
       else if (act === 'set-table-filter') { ui.tableRoleFilter = el.getAttribute('data-value'); render(); }
+      else if (act === 'set-table-tag-filter') { ui.tableTagFilter = el.getAttribute('data-value'); render(); }
     });
 
     render();
