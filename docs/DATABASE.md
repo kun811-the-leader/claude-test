@@ -1,11 +1,14 @@
 # Database
 
-Schema: `prisma/schema.prisma`. SQLite for local dev (`DATABASE_URL="file:./dev.db"`, zero setup),
-designed to move to Postgres/Supabase with minimal changes.
+Schema: `prisma/schema.prisma`. Provider is `postgresql` — point `DATABASE_URL` at any real Postgres
+(a free one from neon.tech/Supabase/Vercel Postgres for dev or prod, or a local `postgres` for offline
+dev) and `npm run db:push` works as-is. Verified against a real local Postgres 16, not just SQLite.
 
-## Why SQLite now, and exactly how to leave it
+## Why "enum" and "Json" columns are plain String
 
-SQLite's Prisma connector supports neither a native `Json` type nor native enums. So:
+The schema was originally built against SQLite (whose Prisma connector has neither native `Json` nor
+native enums) and stayed that way after moving to Postgres, on purpose — no migration needed, and one
+fewer thing to keep in sync between the TypeScript layer and the database:
 
 - Every "enum" (`Task.status`, `Approval.decision`, ...) is a plain `String` column, validated at the
   application boundary by the zod enums in `src/lib/types.ts` — never compared against a raw string
@@ -14,10 +17,10 @@ SQLite's Prisma connector supports neither a native `Json` type nor native enums
   holding serialized JSON, always read/written through `src/lib/json.ts`'s `toJson`/`fromJson` — never
   `JSON.parse`/`stringify` ad hoc.
 
-To move to Postgres: change `provider = "sqlite"` to `provider = "postgresql"` in `schema.prisma`, point
-`DATABASE_URL` at your Postgres instance, run `npm run db:push` (or set up real migrations with
-`prisma migrate`). The enum/Json fields keep working as plain strings — you don't have to touch them,
-though converting them to native `Json`/enum types afterward is a nice-to-have, not required.
+Postgres itself fully supports native `Json`/`jsonb` and enum types now that we're on it — converting
+these columns is a real, available cleanup, just not required for anything to work. If you do it, the
+only files that need to change are `prisma/schema.prisma` (drop `// string[]`-style String fields to
+native `Json`) and `src/lib/json.ts`'s call sites (which become no-ops).
 
 ## Embeddings: local now, pgvector later
 

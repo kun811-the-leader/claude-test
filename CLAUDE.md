@@ -14,7 +14,7 @@
 4. **Prompt를 컴포넌트 파일에 하드코딩하지 말 것.** 모든 Agent 정의(`systemPrompt` 포함)는
    `src/lib/agents/definitions.ts` 한 곳에서 관리합니다.
 5. **JSON 컬럼을 `JSON.parse`/`JSON.stringify` 직접 호출하지 말 것.** 항상 `src/lib/json.ts`의
-   `toJson`/`fromJson`을 거치세요 — SQLite는 네이티브 Json 타입이 없어서 모든 구조화 컬럼이 String입니다.
+   `toJson`/`fromJson`을 거치세요 — 구조화 컬럼이 전부 String이라서 그렇습니다 (`docs/DATABASE.md` 참고).
 6. **`legacy/`를 삭제하거나 사용자 승인 없이 되돌리지 말 것.**
 7. **Report Version을 덮어쓰지 말 것.** 재작업은 항상 같은 `Report`에 새 `ReportVersion`을 추가합니다 (현재
    구현은 재작업 시 `runAgentJob`이 새 버전을 만듭니다 — `report.currentVersion` 증가 로직을 건드릴 때
