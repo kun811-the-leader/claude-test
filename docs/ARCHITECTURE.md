@@ -88,7 +88,7 @@ for when that loop exists) — only `executor.ts`.
 | Transcription | Paste-only (always works) | Implement an adapter in a new `src/lib/transcription/adapter.ts`, call it from a new "upload audio" path in the meeting form |
 | Meeting → MeetingActionItem | Mark's report uses the generic `ReportDeliverable.structured` field, not the dedicated `Meeting`/`MeetingActionItem` tables | Add a parser that reads `structured` into `Meeting`+`MeetingActionItem` rows on approval, plus a "[업무 생성]" button per action item calling `createHandoffTask`-like logic |
 | Workflow visual editor | Flow View auto-traces Handoff chains | Build a canvas UI writing to `WorkflowNode`/`WorkflowEdge` |
-| Auth / multi-workspace | Schema supports it; no login | Add NextAuth (or similar), replace `getDefaultWorkspace()`/`getDefaultUser()` with session lookups |
+| Auth / multi-workspace | Schema supports it; no login. A site-wide banner (`src/app/layout.tsx`'s `NoAuthBanner`, hidden by setting `AUTH_ENABLED`) and a confirm-through warning page before Google OAuth (`/integrations/connect-warning`) exist specifically because there's no login — don't remove either without adding real auth first | Add NextAuth (or similar), replace `getDefaultWorkspace()`/`getDefaultUser()` with session lookups, then set `AUTH_ENABLED=1` |
 | True iterative tool-use loop | Single-shot context injection (see above) | Rewrite `executor.ts` around Anthropic's `tool_use` content blocks |
 
 None of these are "TODO, ran out of time and hoped nobody would notice" — each has a real interface

@@ -1,23 +1,35 @@
-// NOTE: SQLite's Prisma connector has no native Json type, so all JSON-shaped
-// columns below are String (serialized JSON text). Parse/serialize helpers
-// live in src/lib/json.ts — always go through those, never JSON.parse/stringify
-// ad hoc, so a future Postgres migration to native `Json` is a single seam.
-
-// AI Staff Operating System — data model.
+// AI Staff Operating System — data model. Postgres (originally built against
+// SQLite, which has neither native Json nor native enums — that's why every
+// "Json-shaped" or "enum-shaped" column below is a plain String rather than
+// Json/native enum; see docs/DATABASE.md for the full rationale and the
+// migration path if you want to convert them now that Postgres supports both).
 //
-// Provider is "sqlite" for zero-setup local dev. To move to Postgres/Supabase:
-// change provider to "postgresql", point DATABASE_URL at it, run `npm run db:push`.
-// Enum-like fields are plain String (SQLite has no native enum support) — valid
-// values are enforced in code via zod schemas in src/lib/types.ts, and status
-// transitions are enforced in src/lib/task/state-machine.ts. See docs/DATABASE.md.
+// JSON-shaped columns always go through src/lib/json.ts's toJson/fromJson,
+// never JSON.parse/stringify ad hoc. Enum-shaped columns are validated at the
+// application boundary by the zod enums in src/lib/types.ts. Status
+// transitions are enforced in src/lib/task/state-machine.ts — nowhere else
+// assigns task.status directly.
+//
+// Run `npm run db:migrate` after changing this file (creates + applies a
+// migration locally); `npm run build` runs `prisma migrate deploy`
+// automatically in CI/Vercel, so committed migrations just need to exist.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  // Pooled connection (PgBouncer) — what the running app queries through.
+  // Required for serverless (Vercel): each function invocation would
+  // otherwise open its own raw Postgres connection and exhaust Neon's
+  // connection limit under any real concurrency. See docs/DEPLOYMENT.md.
+  url       = env("DATABASE_URL")
+  // Direct (unpooled) connection — schema changes (`prisma migrate
+  // deploy`/`db push`) use this instead, because PgBouncer's transaction
+  // pooling mode doesn't support the session-level features/advisory locks
+  // migrations need.
+  directUrl = env("DIRECT_URL")
 }
 
 // ─────────────────────────────────────────────────────────────────────────

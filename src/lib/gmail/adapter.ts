@@ -1,4 +1,5 @@
 import { google } from "googleapis";
+import { decryptToken } from "@/lib/crypto";
 
 /**
  * Gmail Adapter (spec §9, §43). Two concerns kept separate on purpose:
@@ -60,14 +61,18 @@ export const GMAIL_SCOPES = {
 };
 
 /**
- * Returns a real Gmail API client bound to a stored refresh token, or null
- * if this workspace hasn't connected Gmail yet / OAuth isn't configured.
+ * Returns a real Gmail API client bound to a stored (encrypted-at-rest)
+ * refresh token, or null if this workspace hasn't connected Gmail yet /
+ * OAuth isn't configured. Pass `integration.refreshTokenEnc` straight from
+ * the database — decryption happens here, never at the call site, so
+ * there's exactly one place a plaintext token exists in memory.
  * Access-token refresh is handled by the googleapis client itself once the
  * refresh_token is set as credentials.
  */
-export function getGmailClient(refreshToken: string | null | undefined) {
+export function getGmailClient(refreshTokenEnc: string | null | undefined) {
   const client = getOAuthClient();
-  if (!client || !refreshToken) return null;
+  if (!client || !refreshTokenEnc) return null;
+  const refreshToken = decryptToken(refreshTokenEnc);
   client.setCredentials({ refresh_token: refreshToken });
   return google.gmail({ version: "v1", auth: client });
 }

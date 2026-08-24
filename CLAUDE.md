@@ -19,6 +19,17 @@
 7. **Report Version을 덮어쓰지 말 것.** 재작업은 항상 같은 `Report`에 새 `ReportVersion`을 추가합니다 (현재
    구현은 재작업 시 `runAgentJob`이 새 버전을 만듭니다 — `report.currentVersion` 증가 로직을 건드릴 때
    주의).
+8. **OAuth Refresh Token을 암호화 없이 저장하지 말 것.** `Integration.refreshTokenEnc`에 쓰기 전 항상
+   `src/lib/crypto.ts`의 `encryptToken()`을, 읽어서 쓸 때는 `decryptToken()`을 거치세요. `getGmailClient()`가
+   이미 내부에서 복호화하니, 호출부에서 직접 복호화하지 마세요 — 평문 토큰이 메모리에 존재하는 지점을
+   한 곳으로 유지하기 위함입니다.
+9. **로그인 기능이 생기기 전까지 `NoAuthBanner`(`src/app/layout.tsx`)나 Google OAuth 연결 경고 화면
+   (`/integrations/connect-warning`)을 제거하지 말 것.** 배포 주소를 아는 사람 누구나 전체 데이터에
+   접근 가능하다는 게 여전히 사실이기 때문입니다 — `docs/ARCHITECTURE.md`의 Auth 항목 참고.
+10. **DB 스키마를 바꾼 뒤 `npm run db:migrate`로 마이그레이션 파일을 커밋하지 않고 넘어가지 말 것.**
+    `prisma db push`로 로컬에서 임시로 확인하는 것까진 괜찮지만, 최종적으로는 항상 마이그레이션을
+    생성해서 `prisma/migrations/`에 커밋하세요 — 그래야 `npm run build`(Vercel 배포 포함)가 자동으로
+    적용합니다. 커밋 안 된 스키마 변경은 배포 환경에 절대 반영되지 않습니다.
 
 ## 아키텍처 원칙
 

@@ -3,6 +3,7 @@ import { getOAuthClient } from "@/lib/gmail/adapter";
 import { prisma } from "@/lib/prisma";
 import { getDefaultWorkspace } from "@/lib/workspace";
 import { audit } from "@/lib/audit";
+import { encryptToken } from "@/lib/crypto";
 
 export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get("code");
@@ -23,6 +24,17 @@ export async function GET(req: NextRequest) {
     // non-fatal — connection still succeeds without a displayed email
   }
 
+  if (!tokens.refresh_token) {
+    // Google only returns a refresh_token on the FIRST consent (or after
+    // revoking + re-consenting) — without one we'd have nothing durable to
+    // encrypt and store, so fail loudly instead of silently half-connecting.
+    return NextResponse.json(
+      { error: "Google didn't return a refresh token. Revoke this app's access in your Google Account and try connecting again." },
+      { status: 400 }
+    );
+  }
+  const encryptedRefreshToken = encryptToken(tokens.refresh_token);
+
   const workspace = await getDefaultWorkspace();
   for (const provider of ["gmail", "google_drive"] as const) {
     await prisma.integration.upsert({
@@ -30,7 +42,7 @@ export async function GET(req: NextRequest) {
       update: {
         status: "connected",
         accountEmail,
-        refreshTokenEnc: tokens.refresh_token ?? undefined,
+        refreshTokenEnc: encryptedRefreshToken,
         scope: tokens.scope,
         connectedAt: new Date(),
       },
@@ -39,7 +51,7 @@ export async function GET(req: NextRequest) {
         provider,
         status: "connected",
         accountEmail,
-        refreshTokenEnc: tokens.refresh_token ?? undefined,
+        refreshTokenEnc: encryptedRefreshToken,
         scope: tokens.scope,
         connectedAt: new Date(),
       },
