@@ -10,8 +10,9 @@ let state = { tasks: [] };
 if (fs.existsSync(statePath)) {
   state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
 }
+state = mod.ensureCollections(state);
 
 const html = mod.shellHtml(state, appSrc);
 const outPath = process.argv[2] || path.join(__dirname, '..', 'report-board.html');
 fs.writeFileSync(outPath, html);
-console.log('wrote', outPath, '(' + html.length + ' bytes), tasks:', state.tasks.length);
+console.log('wrote', outPath, '(' + html.length + ' bytes), tasks:', state.tasks.length, 'missions:', state.missions.length);

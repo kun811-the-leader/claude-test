@@ -5,15 +5,19 @@
 // Usage:
 //   node agent.js <op> <argsJson> <inHtmlPath> <outHtmlPath>
 //
-// ops: assign | start | report | accept | revise | cancel | show
+// ops: assign | start | report | accept | revise | cancel | mission-add |
+//      mission-toggle | mission-delete | show
 //
-//   assign  '{"roleId":"market-researcher","title":"...","brief":"...","deadline":"2026-08-30","recurring":false,"dependsOn":null}'
-//   start   '{"taskId":"t-..."}'
-//   report  '{"taskId":"t-...","text":"..."}'
-//   accept  '{"taskId":"t-...","tags":["고객사A","Q3"]}'
-//   revise  '{"taskId":"t-...","text":"..."}'
-//   cancel  '{"taskId":"t-..."}'
-//   show    (prints a compact task list to stderr, writes state.json, no HTML change)
+//   assign         '{"roleId":"market-researcher","title":"...","brief":"...","deadline":"2026-08-30","recurring":false,"dependsOn":null}'
+//   start          '{"taskId":"t-..."}'
+//   report         '{"taskId":"t-...","text":"..."}'
+//   accept         '{"taskId":"t-...","tags":["고객사A","Q3"]}'
+//   revise         '{"taskId":"t-...","text":"..."}'
+//   cancel         '{"taskId":"t-..."}'
+//   mission-add    '{"scope":"day 또는 week","text":"오늘/이번주 꼭 할 것","linkedTaskId":"t-... 또는 생략"}'
+//   mission-toggle '{"missionId":"m-..."}'
+//   mission-delete '{"missionId":"m-..."}'
+//   show           (prints a compact task+mission list to stderr, writes state.json, no HTML change)
 //
 // The extracted <script type="application/json" id="state-data"> block is the
 // source of truth. This script never re-renders the DOM (that only happens in
@@ -28,7 +32,7 @@ const mod = require(path.join(__dirname, 'app-script.js'));
 function extractState(html) {
   const m = html.match(/<script type="application\/json" id="state-data">([\s\S]*?)<\/script>/);
   if (!m) throw new Error('state-data block not found in input HTML');
-  return JSON.parse(m[1]);
+  return mod.ensureCollections(JSON.parse(m[1]));
 }
 
 function main() {
@@ -54,6 +58,12 @@ function main() {
     newState = mod.mutations.revise(state, args.taskId, args.text);
   } else if (op === 'cancel') {
     newState = mod.mutations.cancel(state, args.taskId);
+  } else if (op === 'mission-add') {
+    newState = mod.mutations.addMission(state, args);
+  } else if (op === 'mission-toggle') {
+    newState = mod.mutations.toggleMission(state, args.missionId);
+  } else if (op === 'mission-delete') {
+    newState = mod.mutations.deleteMission(state, args.missionId);
   } else if (op === 'show') {
     state.tasks.forEach(function (t) {
       console.error(
@@ -61,6 +71,9 @@ function main() {
         ' ' + t.id + ' :: ' + mod.ROLE_BY_ID[t.roleId].name + ' :: ' + t.title +
         (t.deadline ? ' (deadline ' + t.deadline + ')' : '')
       );
+    });
+    (state.missions || []).forEach(function (m) {
+      console.error('[mission/' + m.scope + '/' + m.periodKey + ']' + (m.done ? ' (done)' : '') + ' ' + m.id + ' :: ' + m.text);
     });
     fs.writeFileSync(path.join(__dirname, 'state.json'), JSON.stringify(state, null, 2));
     return;
@@ -75,10 +88,14 @@ function main() {
   fs.writeFileSync(out, outHtml);
   fs.writeFileSync(path.join(__dirname, 'state.json'), JSON.stringify(newState, null, 2));
 
-  // Print the id of the task this op touched (or the newly created one) so
-  // the caller can chain further ops without re-deriving it.
-  const touched = args.taskId || (newState.tasks[newState.tasks.length - 1] && newState.tasks[newState.tasks.length - 1].id);
-  console.error('ok: ' + op + ' -> task ' + touched + ' | wrote ' + out);
+  // Print the id this op touched (or the newly created one) so the caller
+  // can chain further ops without re-deriving it.
+  let touched = args.taskId || args.missionId;
+  if (!touched) {
+    if (op === 'mission-add') touched = newState.missions[newState.missions.length - 1] && newState.missions[newState.missions.length - 1].id;
+    else touched = newState.tasks[newState.tasks.length - 1] && newState.tasks[newState.tasks.length - 1].id;
+  }
+  console.error('ok: ' + op + ' -> ' + touched + ' | wrote ' + out);
   console.log(touched);
 }
 

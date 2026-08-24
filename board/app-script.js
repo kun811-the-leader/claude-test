@@ -101,6 +101,22 @@
     .banner.danger { background: var(--danger-bg); color: var(--danger); }
     .banner.info { background: var(--accent-bg); color: var(--accent); }
 
+    .mission-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 8px; }
+    .mission-col { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 8px; }
+    .mission-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .mission-head h3 { font-family: var(--font-display); font-weight: 700; font-size: 14.5px; margin: 0; }
+    .mission-list { display: flex; flex-direction: column; gap: 2px; }
+    .mission-empty { font-size: 12.5px; color: var(--ink-muted); font-style: italic; padding: 4px 0; }
+    .mission-item { display: flex; align-items: center; gap: 8px; padding: 6px 2px; font-size: 13.5px; cursor: pointer; border-radius: 6px; }
+    .mission-item:hover { background: var(--surface-2); }
+    .mission-item input { width: auto; flex: none; }
+    .mission-text { flex: 1; }
+    .mission-item.done .mission-text { text-decoration: line-through; color: var(--ink-muted); }
+    .mission-del { background: none; border: none; color: var(--ink-muted); font-size: 12px; padding: 2px 4px; opacity: 0; }
+    .mission-item:hover .mission-del { opacity: 1; }
+    .mission-add { display: flex; gap: 6px; margin-top: 4px; }
+    .mission-add input { flex: 1; }
+
     .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin: 22px 0 30px; box-shadow: var(--shadow); }
     .stat { background: var(--surface); padding: 15px 16px; display: flex; flex-direction: column; gap: 4px; }
     .stat .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; font-size: 24px; line-height: 1; }
@@ -183,6 +199,7 @@
     .tag.st-cancelled { background: var(--chip-bg); color: var(--ink-muted); }
     .deadline { font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); flex: none; }
     .deadline.overdue { color: var(--danger); font-weight: 600; }
+    .task-preview { padding: 0 12px 10px 44px; font-size: 12.5px; color: var(--ink-muted); background: var(--surface); }
     .dep-badge { font-size: 11px; color: var(--ink-muted); flex: none; }
     .recur-badge { font-size: 11px; color: var(--accent); flex: none; }
     .topic-tag { font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: var(--accent-bg); color: var(--accent); display: inline-block; }
@@ -266,9 +283,40 @@
     return fmtDeadline(dateOnly(ts));
   }
 
+  function isoWeekKey(ts) {
+    var d = new Date(ts);
+    d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+    var day = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - day);
+    var yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    var weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+    return d.getUTCFullYear() + '-W' + (weekNo < 10 ? '0' : '') + weekNo;
+  }
+
+  function weekRangeLabel(ts) {
+    var d = new Date(ts);
+    var day = d.getDay() || 7;
+    var mon = new Date(d); mon.setDate(d.getDate() - day + 1);
+    var sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    return (mon.getMonth() + 1) + '/' + mon.getDate() + ' ~ ' + (sun.getMonth() + 1) + '/' + sun.getDate();
+  }
+
+  function ensureCollections(state) {
+    if (!state.missions) state.missions = [];
+    return state;
+  }
+
   function isOverdue(task) {
     if (!task.deadline || task.status === 'accepted' || task.status === 'cancelled') return false;
     return task.deadline < dateOnly(Date.now());
+  }
+
+  function dDayLabel(task) {
+    if (!task.deadline || task.status === 'accepted' || task.status === 'cancelled') return '';
+    var n = dayDiff(dateOnly(Date.now()), task.deadline);
+    if (n === 0) return ' · D-day';
+    if (n > 0) return ' · D-' + n;
+    return ' · ' + (-n) + '일 지남';
   }
 
   function openTasksForRole(state, roleId) {
@@ -379,10 +427,75 @@
       t.status = 'cancelled';
       t.thread.push({ type: 'cancel', text: '', ts: Date.now() });
       return s;
+    },
+    addMission: function (state, data) {
+      var s = ensureCollections(deepClone(state)), now = Date.now();
+      var scope = data.scope === 'week' ? 'week' : 'day';
+      s.missions.push({
+        id: 'm-' + now + '-' + Math.random().toString(36).slice(2, 7),
+        scope: scope,
+        periodKey: scope === 'week' ? isoWeekKey(now) : dateOnly(now),
+        text: data.text, done: false, createdAt: now, doneAt: null,
+        linkedTaskId: data.linkedTaskId || null
+      });
+      return s;
+    },
+    toggleMission: function (state, missionId) {
+      var s = ensureCollections(deepClone(state));
+      var m = s.missions.filter(function (x) { return x.id === missionId; })[0];
+      if (!m) return s;
+      m.done = !m.done;
+      m.doneAt = m.done ? Date.now() : null;
+      return s;
+    },
+    deleteMission: function (state, missionId) {
+      var s = ensureCollections(deepClone(state));
+      s.missions = s.missions.filter(function (x) { return x.id !== missionId; });
+      return s;
     }
   };
 
   /* ================= render: pure string builders ================= */
+
+  function missionColumnHtml(state, scope, periodKey, title, periodLabel) {
+    var items = state.missions.filter(function (m) { return m.scope === scope && m.periodKey === periodKey; })
+      .sort(function (a, b) { return a.createdAt - b.createdAt; });
+    var done = items.filter(function (m) { return m.done; }).length;
+
+    var rows = items.map(function (m) {
+      var linked = m.linkedTaskId ? taskById(state, m.linkedTaskId) : null;
+      return (
+        '<label class="mission-item' + (m.done ? ' done' : '') + '">' +
+          '<input type="checkbox" data-act="toggle-mission" data-mission="' + m.id + '"' + (m.done ? ' checked' : '') + '>' +
+          '<span class="mission-text">' + escapeHtml(m.text) + '</span>' +
+          (linked ? '<span class="dep-badge">↳ ' + escapeHtml(linked.title) + '</span>' : '') +
+          '<button type="button" class="mission-del" data-act="delete-mission" data-mission="' + m.id + '" title="삭제">✕</button>' +
+        '</label>'
+      );
+    }).join('');
+
+    return (
+      '<div class="mission-col">' +
+        '<div class="mission-head"><h3>' + title + '</h3><span class="hint">' + periodLabel + (items.length ? ' · ' + done + '/' + items.length + ' 완료' : '') + '</span></div>' +
+        '<div class="mission-list">' + (rows || '<div class="mission-empty">아직 미션이 없어요.</div>') + '</div>' +
+        '<div class="mission-add">' +
+          '<input type="text" placeholder="미션 추가 후 Enter" data-mission-input="' + scope + '">' +
+          '<button class="btn-ghost" data-act="add-mission" data-scope="' + scope + '">추가</button>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function missionsHtml(state) {
+    var now = Date.now();
+    return (
+      '<div class="section-head"><h2>오늘·이번주 미션</h2><span class="hint">하루/일주일 단위로 꼭 해낼 것을 정해두세요</span></div>' +
+      '<div class="mission-grid">' +
+        missionColumnHtml(state, 'day', dateOnly(now), '오늘의 미션', fmtDeadline(dateOnly(now))) +
+        missionColumnHtml(state, 'week', isoWeekKey(now), '이번주 미션', weekRangeLabel(now)) +
+      '</div>'
+    );
+  }
 
   function statsHtml(state) {
     var open = state.tasks.filter(function (t) { return t.status !== 'accepted' && t.status !== 'cancelled'; });
@@ -560,7 +673,12 @@
 
     var deadlineText = task.recurring
       ? ('🔁 매일 반복' + (task.runs.length ? ' · ' + task.runs.length + '회 완료' : ''))
-      : fmtDeadline(task.deadline);
+      : fmtDeadline(task.deadline) + dDayLabel(task);
+
+    var latest = task.thread[task.thread.length - 1];
+    var previewText = latest && latest.text
+      ? (latest.text.length > 90 ? latest.text.slice(0, 90) + '…' : latest.text)
+      : (STATUS_META[task.status] ? STATUS_META[task.status].label + ' — 아직 진행 메모가 없어요' : '');
 
     return (
       '<div class="task-item">' +
@@ -570,6 +688,7 @@
           (dep ? '<span class="dep-badge" title="선행 업무: ' + escapeHtml(dep.title) + '">⛓ ' + escapeHtml(ROLE_BY_ID[dep.roleId] ? ROLE_BY_ID[dep.roleId].name : '') + '</span>' : '') +
           '<span class="deadline' + (isOverdue(task) ? ' overdue' : '') + '">' + deadlineText + '</span>' +
         '</div>' +
+        '<div class="task-preview">' + escapeHtml(previewText) + '</div>' +
         '<div class="task-body' + (open ? ' open' : '') + '">' +
           '<div class="task-brief">' + escapeHtml(task.brief || '(상세 지시사항 없음)') + '</div>' +
           '<div class="thread">' + task.thread.map(threadItemHtml).join('') + '</div>' +
@@ -704,7 +823,9 @@
         '<h1>업무 지휘본부</h1>' +
         '<p class="sub">각 담당자에게 <strong>업무를 배정</strong>하고, 보고가 올라오면 검토해서 승인하세요. 승인된 업무는 완료 테이블에 쌓이고, 서로 이어지는 업무는 타임라인에서 흐름으로 볼 수 있어요.</p>' +
       '</header>' +
+      '<div class="banner info">이 페이지는 기록 화면이에요. 새 업무 배정·질문·수정은 Claude와의 채팅에서 하세요 — 여기서 버튼을 눌러 직접 추가해도 Claude가 자동으로 알아채고 시작하지는 않아요. 채팅에서 진행하면 보고와 태그도 담당자가 직접 채워서 올려요.</div>' +
       bannerHtml(ui) +
+      missionsHtml(state) +
       statsHtml(state) +
       timelineHtml(state, ui) +
       '<div class="section-head"><h2>담당자별 업무</h2><span class="hint">카드에서 업무를 배정하고 진행 상황을 확인하세요</span></div>' +
@@ -745,7 +866,9 @@
     taskById: taskById,
     lastOfType: lastOfType,
     allTags: allTags,
-    mutations: mutations
+    mutations: mutations,
+    ensureCollections: ensureCollections,
+    isoWeekKey: isoWeekKey
   };
 
   if (typeof module !== 'undefined' && module.exports) {
@@ -758,7 +881,7 @@
 
   function runBrowser() {
     var SELF_SRC = document.currentScript.textContent;
-    var STATE = JSON.parse(document.getElementById('state-data').textContent);
+    var STATE = ensureCollections(JSON.parse(document.getElementById('state-data').textContent));
     var ui = {
       openAssign: {}, openTask: {}, showCancelled: {},
       showCompletedInTimeline: false, tableRoleFilter: 'all', tableTagFilter: 'all',
@@ -818,6 +941,10 @@
       });
     }
 
+    function addMission(scope, text, linkedTaskId) { if (!text || !text.trim()) return; publishState(mutations.addMission(STATE, { scope: scope, text: text.trim(), linkedTaskId: linkedTaskId })); }
+    function toggleMission(id) { publishState(mutations.toggleMission(STATE, id)); }
+    function deleteMission(id) { publishState(mutations.deleteMission(STATE, id)); }
+
     function assignTask(roleId, data) { publishState(mutations.assign(STATE, roleId, data)); }
     function startTask(id) { publishState(mutations.start(STATE, id)); }
     function submitReport(id, text) { publishState(mutations.report(STATE, id, text)); }
@@ -830,7 +957,16 @@
       if (!el) return;
       var act = el.getAttribute('data-act'), roleId = el.getAttribute('data-role'), taskId = el.getAttribute('data-task');
 
-      if (act === 'toggle-assign') {
+      if (act === 'toggle-mission') {
+        toggleMission(el.getAttribute('data-mission'));
+      } else if (act === 'delete-mission') {
+        deleteMission(el.getAttribute('data-mission'));
+      } else if (act === 'add-mission') {
+        var scope = el.getAttribute('data-scope');
+        var input = document.querySelector('[data-mission-input="' + scope + '"]');
+        addMission(scope, input.value);
+        input.value = '';
+      } else if (act === 'toggle-assign') {
         ui.openAssign[roleId] = !ui.openAssign[roleId]; render();
         setTimeout(function () { var f = document.querySelector('[data-assign-form="' + roleId + '"] [name=title]'); if (f) f.focus(); }, 0);
       } else if (act === 'cancel-assign') { ui.openAssign[roleId] = false; render(); }
@@ -879,6 +1015,16 @@
     var capPromise = (root.claude && root.claude.use) ? root.claude.use('artifact') : Promise.resolve(null);
     capPromise.then(function (cap) { artifactCap = cap; if (!cap) ui.offline = true; render(); }).catch(function () { ui.offline = true; render(); });
     root.addEventListener('resize', drawConnectors);
+
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter') return;
+      var el = ev.target.closest('[data-mission-input]');
+      if (!el) return;
+      ev.preventDefault();
+      var scope = el.getAttribute('data-mission-input');
+      addMission(scope, el.value);
+      el.value = '';
+    });
   }
 
 })(typeof window !== 'undefined' ? window : this);
