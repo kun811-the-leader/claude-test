@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --paper: #eef0f4;
+  --surface: #ffffff;
+  --surface-2: #f6f7fa;
+  --ink: #1a2130;
+  --ink-muted: #5b6472;
+  --line: #dadfe7;
+  --accent: #3454d1;
+  --accent-bg: #e7ecfb;
+  --ok: #1e8e5a;
+  --ok-bg: #e3f5ec;
+  --warn: #a9660c;
+  --warn-bg: #fbf0dd;
+  --danger: #b23a2e;
+  --danger-bg: #fbe7e3;
+
+  --font-display: "Pretendard", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --font-body: "Pretendard", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #10131a;
+    --surface: #171b24;
+    --surface-2: #1e232e;
+    --ink: #e7e9ee;
+    --ink-muted: #9aa3b2;
+    --line: #2a3040;
+    --accent: #7c93ff;
+    --accent-bg: rgba(124, 147, 255, 0.16);
+    --ok: #45c285;
+    --ok-bg: rgba(69, 194, 133, 0.14);
+    --warn: #e3a83d;
+    --warn-bg: rgba(227, 168, 61, 0.14);
+    --danger: #e2695c;
+    --danger-bg: rgba(226, 105, 92, 0.14);
+  }
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.badge {
+  @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+}
+.card {
+  @apply rounded-xl border bg-surface p-4 shadow-sm;
+  border-color: var(--line);
+}

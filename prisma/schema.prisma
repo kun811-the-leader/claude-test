@@ -1,0 +1,733 @@
+// AI Staff Operating System — data model. Postgres (originally built against
+// SQLite, which has neither native Json nor native enums — that's why every
+// "Json-shaped" or "enum-shaped" column below is a plain String rather than
+// Json/native enum; see docs/DATABASE.md for the full rationale and the
+// migration path if you want to convert them now that Postgres supports both).
+//
+// JSON-shaped columns always go through src/lib/json.ts's toJson/fromJson,
+// never JSON.parse/stringify ad hoc. Enum-shaped columns are validated at the
+// application boundary by the zod enums in src/lib/types.ts. Status
+// transitions are enforced in src/lib/task/state-machine.ts — nowhere else
+// assigns task.status directly.
+//
+// Run `npm run db:migrate` after changing this file (creates + applies a
+// migration locally); `npm run build` runs `prisma migrate deploy`
+// automatically in CI/Vercel, so committed migrations just need to exist.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Pooled connection (PgBouncer) — what the running app queries through.
+  // Required for serverless (Vercel): each function invocation would
+  // otherwise open its own raw Postgres connection and exhaust Neon's
+  // connection limit under any real concurrency. See docs/DEPLOYMENT.md.
+  url       = env("DATABASE_URL")
+  // Direct (unpooled) connection — schema changes (`prisma migrate
+  // deploy`/`db push`) use this instead, because PgBouncer's transaction
+  // pooling mode doesn't support the session-level features/advisory locks
+  // migrations need.
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Workspace / Users
+// ─────────────────────────────────────────────────────────────────────────
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users         User[]
+  agents        Agent[]
+  tasks         Task[]
+  tags          Tag[]
+  workflows     Workflow[]
+  leads         Lead[]
+  emailDrafts   EmailDraft[]
+  emailBatches  EmailBatch[]
+  meetings      Meeting[]
+  documents     Document[]
+  integrations  Integration[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+}
+
+model User {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  email       String   @unique
+  // "owner" | "member" — single-user today, kept for multi-workspace growth.
+  role        String   @default("owner")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id])
+  notifications Notification[]
+
+  @@index([workspaceId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Agents (AI Staff)
+// ─────────────────────────────────────────────────────────────────────────
+
+model Agent {
+  id          String @id @default(cuid())
+  workspaceId String
+  // stable slug, e.g. "market-researcher" — matches src/lib/agents/definitions.ts
+  key         String
+  name        String
+  mission     String
+
+  responsibilities    String // string[]
+  clarificationPolicy String // { maxQuestions: number, guidance: string }
+  executionPolicy     String // { steps: string[] }
+  allowedTools        String // string[] tool names
+  forbiddenActions    String // string[]
+  outputSchema         String // JSON-schema-ish description of the deliverable shape
+  approvalPolicy       String // { autoApprovable: string[], requiresApproval: string[] }
+  handoffRules         String // { suggestsHandoffTo: string[] }
+  knowledgeScope       String // string[] document/source-type hints for RAG
+  systemPrompt         String
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id])
+  tasks         Task[]
+  agentJobs     AgentJob[]
+  conversations Conversation[]
+
+  @@unique([workspaceId, key])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tasks — the core loop
+// ─────────────────────────────────────────────────────────────────────────
+
+model Task {
+  id          String  @id @default(cuid())
+  workspaceId String
+  agentId     String
+  title       String
+
+  // draft|clarifying|ready|queued|working|review|revision|scheduled|approved|cancelled|failed
+  status   String @default("draft")
+  // low|normal|high|urgent
+  priority String @default("normal")
+
+  deadline DateTime?
+
+  // Recurring support (Task acts as its own template; see TaskRun for executions)
+  isRecurring    Boolean   @default(false)
+  // one_off|daily|weekly|custom
+  scheduleType   String    @default("one_off")
+  cronExpression String?
+  timezone       String    @default("Asia/Seoul")
+  nextRunAt      DateTime?
+  lastRunAt      DateTime?
+  enabled        Boolean   @default(true)
+
+  // Handoff provenance — set when this task was created from another task's
+  // approved report instead of typed from scratch.
+  sourceTaskId         String?
+  sourceReportId        String?
+  sourceWorkflowNodeId String?
+
+  workflowNodeId String? @unique
+
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id])
+  agent         Agent            @relation(fields: [agentId], references: [id])
+  briefs        TaskBrief[]
+  conversations Conversation[]
+  runs          TaskRun[]
+  reports       Report[]
+  agentJobs     AgentJob[]
+  entityTags    EntityTag[]
+  workflowNode  WorkflowNode?    @relation(fields: [workflowNodeId], references: [id])
+  dependsOn     TaskDependency[] @relation("DependentTask")
+  dependedOnBy  TaskDependency[] @relation("PrerequisiteTask")
+
+  @@index([workspaceId, status])
+  @@index([agentId, status])
+}
+
+// Many-to-many self relation: a task can depend on several prerequisites.
+model TaskDependency {
+  id             String @id @default(cuid())
+  taskId         String
+  dependsOnTaskId String
+
+  task         Task @relation("DependentTask", fields: [taskId], references: [id])
+  dependsOnTask Task @relation("PrerequisiteTask", fields: [dependsOnTaskId], references: [id])
+
+  @@unique([taskId, dependsOnTaskId])
+}
+
+// Versioned Execution Brief — regenerated through the clarifying conversation,
+// "confirmedAt" is set once the user clicks "이대로 시작".
+model TaskBrief {
+  id     String @id @default(cuid())
+  taskId String
+  version Int
+
+  objective       String
+  background      String?
+  scope           String?
+  target           String?
+  constraints      String? // string[]
+  exclusions       String? // string[]
+  requiredSources String? // string[]
+  deliverables     String  // string[]
+  successCriteria String? // string[]
+  deadline         DateTime?
+  schedule         String? // { scheduleType, cronExpression, timezone }
+  relatedContext   String? // { taskIds: string[], documentIds: string[] }
+
+  confirmedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  task Task @relation(fields: [taskId], references: [id])
+
+  @@unique([taskId, version])
+}
+
+// A task's clarifying conversation, or an agent's free-standing chat.
+model Conversation {
+  id      String  @id @default(cuid())
+  taskId  String?
+  agentId String
+  // "task" | "agent_chat"
+  kind    String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  task     Task?     @relation(fields: [taskId], references: [id])
+  agent    Agent     @relation(fields: [agentId], references: [id])
+  messages Message[]
+
+  @@index([taskId])
+}
+
+model Message {
+  id             String @id @default(cuid())
+  conversationId String
+  // "user" | "agent" | "system"
+  role           String
+  content        String
+  structured     String?
+
+  createdAt DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+
+  @@index([conversationId])
+}
+
+// One execution of a recurring task. One-off tasks don't need this table —
+// their single execution lives on the Task/Report directly.
+model TaskRun {
+  id       String @id @default(cuid())
+  taskId   String
+  runIndex Int
+
+  // scheduled|working|review|approved|failed|cancelled
+  status       String    @default("scheduled")
+  scheduledFor DateTime?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  error        String?
+
+  createdAt DateTime @default(now())
+
+  task      Task       @relation(fields: [taskId], references: [id])
+  report    Report?
+  agentJobs AgentJob[]
+
+  @@unique([taskId, runIndex])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Reports — versioned, never overwritten
+// ─────────────────────────────────────────────────────────────────────────
+
+model Report {
+  id             String  @id @default(cuid())
+  taskId         String
+  taskRunId      String? @unique
+  currentVersion Int     @default(1)
+  // "draft" | "submitted"
+  status         String  @default("draft")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  task       Task            @relation(fields: [taskId], references: [id])
+  taskRun    TaskRun?        @relation(fields: [taskRunId], references: [id])
+  versions   ReportVersion[]
+  approvals  Approval[]
+  entityTags EntityTag[]
+
+  @@index([taskId])
+}
+
+model ReportVersion {
+  id       String @id @default(cuid())
+  reportId String
+  version  Int
+
+  summary               String
+  deliverables           String // structured deliverable payload (shape varies per agent)
+  keyFindings             String? // string[]
+  sources                 String? // { title, url, publisher, publishedAt, accessedAt, excerpt }[]
+  limitations             String?
+  suggestedNextActions String? // string[]
+  suggestedTags           String? // string[]
+  agentNote               String?
+  structuredResult        String? // agent-specific payload, e.g. LeadResult[]
+
+  createdAt DateTime @default(now())
+
+  report    Report     @relation(fields: [reportId], references: [id])
+  approvals Approval[]
+
+  @@unique([reportId, version])
+}
+
+model Approval {
+  id              String  @id @default(cuid())
+  reportId        String
+  reportVersionId String
+  // "approved" | "revision_requested" | "cancelled"
+  decision        String
+  feedback        String?
+  decidedByUserId String?
+  decidedAt       DateTime @default(now())
+
+  createdAt DateTime @default(now())
+
+  report        Report         @relation(fields: [reportId], references: [id])
+  reportVersion ReportVersion  @relation(fields: [reportVersionId], references: [id])
+  emailDrafts   EmailDraft[]
+
+  @@index([reportId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tags
+// ─────────────────────────────────────────────────────────────────────────
+
+model Tag {
+  id          String @id @default(cuid())
+  workspaceId String
+  key         String
+  // "free" | "project" | "market" | "company" | "topic" | "campaign" | "product"
+  kind        String @default("free")
+  label       String
+
+  createdAt DateTime @default(now())
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id])
+  entityTags EntityTag[]
+
+  @@unique([workspaceId, key])
+}
+
+model EntityTag {
+  id     String @id @default(cuid())
+  tagId  String
+  // "task" | "report" | "document" | "lead" | "meeting"
+  entityType String
+
+  taskId     String?
+  reportId   String?
+  documentId String?
+  leadId     String?
+  meetingId  String?
+
+  createdAt DateTime @default(now())
+
+  tag      Tag       @relation(fields: [tagId], references: [id])
+  task     Task?     @relation(fields: [taskId], references: [id])
+  report   Report?   @relation(fields: [reportId], references: [id])
+  document Document? @relation(fields: [documentId], references: [id])
+  lead     Lead?     @relation(fields: [leadId], references: [id])
+  meeting  Meeting?  @relation(fields: [meetingId], references: [id])
+
+  @@index([tagId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Workflow
+// ─────────────────────────────────────────────────────────────────────────
+
+model Workflow {
+  id          String  @id @default(cuid())
+  workspaceId String
+  name        String
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id])
+  nodes     WorkflowNode[]
+  edges     WorkflowEdge[]
+}
+
+model WorkflowNode {
+  id         String @id @default(cuid())
+  workflowId String
+  label      String
+  positionX  Float  @default(0)
+  positionY  Float  @default(0)
+
+  createdAt DateTime @default(now())
+
+  workflow  Workflow       @relation(fields: [workflowId], references: [id])
+  task      Task?
+  edgesFrom WorkflowEdge[] @relation("EdgeFrom")
+  edgesTo   WorkflowEdge[] @relation("EdgeTo")
+
+  @@index([workflowId])
+}
+
+model WorkflowEdge {
+  id          String  @id @default(cuid())
+  workflowId  String
+  fromNodeId  String
+  toNodeId    String
+  condition   String?
+  handoffType String?
+
+  createdAt DateTime @default(now())
+
+  workflow Workflow     @relation(fields: [workflowId], references: [id])
+  fromNode WorkflowNode @relation("EdgeFrom", fields: [fromNodeId], references: [id])
+  toNode   WorkflowNode @relation("EdgeTo", fields: [toNodeId], references: [id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sales / Research artifacts
+// ─────────────────────────────────────────────────────────────────────────
+
+model Lead {
+  id          String @id @default(cuid())
+  workspaceId String
+  taskId      String?
+
+  companyName          String
+  domain               String
+  website              String?
+  country              String?
+  industry             String?
+  employeeRange        String?
+  revenueRange         String?
+  businessSummary      String?
+  whyFit               String?
+  opportunityHypothesis String?
+  recommendedPersona   String?
+  icpScore             Float?
+  confidence           String?
+  sources              String? // Source[]
+  researchDate         DateTime @default(now())
+
+  createdAt DateTime @default(now())
+
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id])
+  entityTags      EntityTag[]
+  salesStrategies SalesStrategy[]
+  emailDrafts     EmailDraft[]
+
+  @@unique([workspaceId, domain])
+}
+
+model SalesStrategy {
+  id     String @id @default(cuid())
+  taskId String
+  leadId String
+
+  recommendedPersona   String?
+  whyNow               String?
+  painPointHypothesis String?
+  valueProposition     String?
+  approachPoint         String?
+  openingMessage        String?
+  proposalOutline       String?
+  cta                   String?
+  objections            String? // { objection, response }[]
+
+  createdAt DateTime @default(now())
+
+  lead      Lead               @relation(fields: [leadId], references: [id])
+  sequence  OutreachSequence[]
+}
+
+model OutreachSequence {
+  id              String @id @default(cuid())
+  salesStrategyId String
+  dayOffset       Int
+  title           String
+  content         String
+
+  createdAt DateTime @default(now())
+
+  salesStrategy SalesStrategy @relation(fields: [salesStrategyId], references: [id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Mail
+// ─────────────────────────────────────────────────────────────────────────
+
+model EmailDraft {
+  id          String  @id @default(cuid())
+  workspaceId String
+  taskId      String?
+  leadId      String?
+
+  to      String
+  subject String
+  body    String
+  // "draft" | "queued" | "approved" | "sent" | "rejected"
+  status  String @default("draft")
+
+  approvalId String?
+  sentAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  workspace  Workspace        @relation(fields: [workspaceId], references: [id])
+  lead       Lead?            @relation(fields: [leadId], references: [id])
+  approval   Approval?        @relation(fields: [approvalId], references: [id])
+  batchItems EmailBatchItem[]
+}
+
+model EmailBatch {
+  id          String @id @default(cuid())
+  workspaceId String
+  name        String
+  // "pending" | "approved" | "sent"
+  status      String @default("pending")
+
+  createdAt DateTime @default(now())
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id])
+  items     EmailBatchItem[]
+}
+
+model EmailBatchItem {
+  id           String  @id @default(cuid())
+  batchId      String
+  emailDraftId String
+  selected     Boolean @default(true)
+
+  batch      EmailBatch @relation(fields: [batchId], references: [id])
+  emailDraft EmailDraft @relation(fields: [emailDraftId], references: [id])
+
+  @@unique([batchId, emailDraftId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Meetings (Mark)
+// ─────────────────────────────────────────────────────────────────────────
+
+model Meeting {
+  id          String  @id @default(cuid())
+  workspaceId String
+  taskId      String?
+
+  title            String
+  date             DateTime @default(now())
+  participants     String? // string[]
+  rawTranscript    String
+  cleanTranscript String?
+  summary          String?
+  keyDiscussion   String? // string[]
+  decisions        String? // string[]
+  openQuestions   String? // string[]
+
+  createdAt DateTime @default(now())
+
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id])
+  actionItems MeetingActionItem[]
+  entityTags  EntityTag[]
+}
+
+model MeetingActionItem {
+  id             String    @id @default(cuid())
+  meetingId      String
+  title          String
+  description    String?
+  suggestedAgentId String?
+  owner          String?
+  dueAt          DateTime?
+  // low|normal|high|urgent
+  priority       String    @default("normal")
+  taskId         String? // set once "업무 생성" is clicked
+
+  createdAt DateTime @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Knowledge / RAG
+// ─────────────────────────────────────────────────────────────────────────
+
+model Document {
+  id          String @id @default(cuid())
+  workspaceId String
+  title       String
+  // "upload" | "report" | "meeting" | "lead" | "other"
+  sourceType  String
+  sourceId    String?
+  // "internal" | "google_drive"
+  storageProvider String @default("internal")
+  storagePath     String?
+  mimeType        String?
+  content         String? // extracted plain text
+
+  createdAt DateTime @default(now())
+
+  workspace  Workspace        @relation(fields: [workspaceId], references: [id])
+  chunks     KnowledgeChunk[]
+  entityTags EntityTag[]
+}
+
+// NOTE: embedding is stored as a JSON float array on SQLite (application-side
+// cosine similarity — see src/lib/knowledge/rag.ts). On Postgres, swap this
+// column for a native `vector` column (pgvector) and use an ANN index instead.
+model KnowledgeChunk {
+  id         String @id @default(cuid())
+  documentId String
+  chunkIndex Int
+  content    String
+  embedding  String? // number[]
+  metadata   String?
+  // mirrors the parent Document.sourceType, denormalized for fast filtering
+  sourceType String
+
+  createdAt DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id])
+
+  @@index([documentId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Integrations / Jobs / Audit
+// ─────────────────────────────────────────────────────────────────────────
+
+model Integration {
+  id          String @id @default(cuid())
+  workspaceId String
+  // "gmail" | "google_drive"
+  provider    String
+  // "disconnected" | "connected"
+  status      String @default("disconnected")
+
+  accountEmail   String?
+  accessTokenEnc String?
+  refreshTokenEnc String?
+  scope           String?
+  connectedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@unique([workspaceId, provider])
+}
+
+model AgentJob {
+  id          String  @id @default(cuid())
+  taskId      String
+  taskRunId   String?
+  agentId     String
+  // "queued" | "running" | "succeeded" | "failed" | "cancelled"
+  status      String  @default("queued")
+  attempt     Int     @default(1)
+
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  error          String?
+  inputSnapshot  String?
+  outputSnapshot String?
+
+  createdAt DateTime @default(now())
+
+  task      Task           @relation(fields: [taskId], references: [id])
+  taskRun   TaskRun?       @relation(fields: [taskRunId], references: [id])
+  agent     Agent          @relation(fields: [agentId], references: [id])
+  toolCalls AgentToolCall[]
+
+  @@index([taskId])
+}
+
+model AgentToolCall {
+  id         String  @id @default(cuid())
+  agentJobId String
+  toolName   String
+  input      String
+  output     String?
+  approvalId String?
+  // "ok" | "error" | "blocked"
+  status     String
+  error      String?
+
+  createdAt DateTime @default(now())
+
+  agentJob AgentJob @relation(fields: [agentJobId], references: [id])
+
+  @@index([agentJobId])
+}
+
+model AuditLog {
+  id          String  @id @default(cuid())
+  workspaceId String
+  // "user" | "agent" | "system"
+  actorType   String
+  actorId     String?
+  action      String
+  entityType  String
+  entityId    String
+  metadata    String?
+
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@index([workspaceId, createdAt])
+}
+
+model Notification {
+  id          String  @id @default(cuid())
+  workspaceId String
+  userId      String?
+  type        String
+  title       String
+  body        String?
+  entityType  String?
+  entityId    String?
+  readAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  user      User?     @relation(fields: [userId], references: [id])
+
+  @@index([workspaceId, readAt])
+}
